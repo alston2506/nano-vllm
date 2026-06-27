@@ -1,6 +1,6 @@
 # 学习进度
 
-Last updated: 2026-06-26
+Last updated: 2026-06-27
 
 ## Learner Profile
 
@@ -69,3 +69,66 @@ Last updated: 2026-06-26
 
 - 你本机是否有可用 NVIDIA GPU，以及是否已经下载 Qwen3-0.6B 权重。
 - 你希望学习节奏偏“每天短课”还是“每次深入 1-2 小时”。
+## Session 2026-06-27
+
+### Summary
+
+本次按学习者反馈调整教学方式：先讲背景和直觉，再进入练习输出，暂不急着深入 nano-vllm 源码。学习者明确指出上一轮讲解节奏过快、把代理运行的练习误说成“你跑通了”，后续教学必须保持教程风格、循序渐进。
+
+### Concepts Covered
+
+- 自回归生成：LLM 不是一次性生成完整答案，而是不断预测下一个 token，并把它追加回上下文。
+- tokenizer：文本给人看，token id 给模型做数字计算。
+- logits：模型给候选 next token 的分数，不是最终文本。
+- greedy sampler：选择 logits 分数最高的 token id。
+- decode 输出复盘：学习者亲自运行 `prereq_01_toy_tokenizer_sampler.py`，能解释为什么选择 `next_id=5` 而不是 `next_id=7`。
+- prefill 与 decode：
+  - prefill 处理用户一开始给出的整段 prompt。
+  - decode 每轮处理一个新生成 token。
+- KV cache：
+  - 用显存空间换时间，缓存旧 token 的中间结果，避免 decode 每轮从头重复计算。
+  - 学习者能回答没有 KV cache 会造成计算资源浪费，长 prompt 和多用户会带来显存压力。
+- scheduler：
+  - 在有限 GPU/KV cache/token batch 资源下，决定每轮哪些请求 prefill、哪些请求 decode、哪些请求等待或释放资源。
+  - 学习者能判断结束请求需要释放 cache，prefill 未完成的请求仍属于 waiting。
+
+### Files / Exercises Used
+
+- `learning/exercises/prereq_01_toy_tokenizer_sampler.py`
+- `learning/exercises/lesson_01_toy_scheduler.py`
+- `learning/docs/prereq_00_llm_inference_big_picture.md`
+- `learning/docs/lesson_01_scheduler.md`
+
+### Learner Answers / Checks
+
+- 能回答 greedy sampler 选择“分数最高”的 token。
+- 能说明 100 个 prompt token 属于 prefill，后续 20 个生成 token 属于 decode。
+- 能指出没有 KV cache 会浪费计算资源。
+- 能指出 KV cache 在长 prompt、多请求情况下带来显存压力。
+- 能解释 toy scheduler 中 B 已经进入 prefill batch 但仍在 waiting，是因为 B 还没有 prefill 完成。
+
+### Lesson Docs Updated
+
+- `learning/docs/prereq_00_llm_inference_big_picture.md`：补充 2026-06-27 课堂复盘，强调教学节奏和概念边界。
+- `learning/docs/lesson_01_scheduler.md`：补充 toy scheduler 输出解释，强调 waiting/running 的真实含义。
+
+### Current Lesson Status
+
+- `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
+- `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
+- `learning/docs/lesson_01_scheduler.md`: in_progress
+- `learning/docs/lesson_00_project_map.md`: pending_restart
+
+### Next Action
+
+下次从 `learning/docs/lesson_01_scheduler.md` 继续。先用 5 分钟复述三层主线：
+
+```text
+单请求生成 -> prefill/decode 与 KV cache -> 多请求 scheduler
+```
+
+然后进入 nano-vllm 源码的第一批温和锚点：
+
+- `nanovllm/engine/sequence.py`：请求状态、prompt token、generated token、finished。
+- `nanovllm/engine/scheduler.py`：waiting/running 队列、资源限制、调度决策。
+- `nanovllm/engine/llm_engine.py`：`step()` 如何把 scheduler 和 model runner 串起来。

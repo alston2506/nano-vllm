@@ -181,3 +181,36 @@ nano-vllm 是这些思想的轻量实现，适合学习。
 3. prefill 和 decode 的主要区别是什么？
 4. KV cache 缓存的是什么，为什么能加速？
 5. vLLM 类系统主要是在优化模型结构，还是在优化推理系统执行？
+## 2026-06-27 课堂复盘
+
+本节需要保持教程式节奏：先讲真实问题和背景，再讲核心直觉，然后才进入练习和源码锚点。学习者反馈“先介绍背景知识、循序渐进”很重要，后续不要一开始就展示源码或直接总结练习结果。
+
+本次已经通过口头检查和练习确认的概念：
+
+- 自回归生成：模型每轮只预测下一个 token，并把它追加回上下文。
+- tokenizer：把人类文本变成模型能处理的 token id。
+- logits：候选 next token 的分数，不是最终文本。
+- greedy sampler：选择 logits 分数最高的 token id。
+- decode 文本变长的原因：每轮选出的 `next_id` 被追加到上下文，再 decode 给人看。
+
+本次学习者亲自运行：
+
+```bash
+python3 learning/exercises/prereq_01_toy_tokenizer_sampler.py
+```
+
+输出中的关键解释：
+
+```text
+token id 是编号
+logits 是分数
+next_id 是被选中的下一个编号
+text 是 decode 后给人看的结果
+```
+
+下次复习本文件时，先让学习者用自己的话解释：
+
+1. tokenizer 为什么要把文本变成 token id？
+2. logits 和 next token id 有什么区别？
+3. sampler 在生成流程中负责什么？
+4. 为什么 `logits={5: 8.0, 7: 1.0}` 会选择 `next_id=5`？

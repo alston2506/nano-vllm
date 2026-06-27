@@ -171,3 +171,47 @@ python3 learning/exercises/lesson_01_toy_scheduler.py
 3. prefill batch 为什么更关注 token 总数？
 4. decode batch 为什么更关注请求数量？
 5. 为什么完成的请求必须释放 KV cache block？
+## 2026-06-27 课堂复盘
+
+本节从“很多请求同时来，GPU/KV cache/token batch 资源有限”这个背景进入 scheduler，而不是直接读源码。
+
+学习者已经运行：
+
+```bash
+python3 learning/exercises/lesson_01_toy_scheduler.py
+```
+
+输出中的关键现象：
+
+```text
+waiting：还没完成 prefill 的请求
+running：prefill 已完成，已经拥有可复用的 KV cache，可以参与 decode 的请求
+prefill batch：本轮在处理 prompt，可能一次处理多个 token
+decode batch：本轮给多个请求各生成 1 个 token
+```
+
+特别要保留的易混点：
+
+```text
+prefill batch 里出现某个请求，不代表它已经完成 prefill。
+如果 prompt 还没全部处理完，它仍然留在 waiting。
+```
+
+学习者已经能解释：
+
+- A 还没开始时，如果资源够就 prefill，资源不够就排队。
+- B 已经 prefill 完并正在生成时，可以进入 decode。
+- C 已经结束时，需要释放 KV cache。
+- toy 输出 step 2 中 B 出现在 `prefill batch`，但仍在 `waiting`，是因为 B 还没有 prefill 完成。
+
+下次继续本课时，先复述 scheduler 的一句话定义：
+
+```text
+Scheduler 在有限 GPU/KV cache/token batch 资源下，决定每一轮让哪些请求运行。
+```
+
+然后再进入源码：
+
+- `nanovllm/engine/sequence.py`：一个请求如何记录 prompt、生成 token、完成状态。
+- `nanovllm/engine/scheduler.py`：waiting/running 队列和资源限制。
+- `nanovllm/engine/llm_engine.py`：每轮 `step()` 如何调度并调用模型执行。
