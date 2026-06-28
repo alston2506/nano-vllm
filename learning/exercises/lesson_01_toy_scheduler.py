@@ -86,7 +86,7 @@ class ToyScheduler:
 
 
 def main() -> None:
-    scheduler = ToyScheduler(max_num_seqs=2, max_num_batched_tokens=6)
+    scheduler = ToyScheduler(max_num_seqs=2, max_num_batched_tokens=3)
     scheduler.add(ToyRequest("A", prompt_tokens=4, max_new_tokens=3))
     scheduler.add(ToyRequest("B", prompt_tokens=8, max_new_tokens=2))
     scheduler.add(ToyRequest("C", prompt_tokens=2, max_new_tokens=4))

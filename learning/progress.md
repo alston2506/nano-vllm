@@ -1,6 +1,6 @@
 # 学习进度
 
-Last updated: 2026-06-27
+Last updated: 2026-06-28
 
 ## Learner Profile
 
@@ -18,30 +18,30 @@ Last updated: 2026-06-27
 ## Current Position
 
 - Stage: 0 - 学习档案与项目地图搭建
-- Current lesson: `learning/docs/prereq_00_llm_inference_big_picture.md`
-- Status: restarted_from_beginning
-- Last covered: 学习者正确复述训练/推理区别、自回归循环和 context 累积；已进入 LLM 推理大图，讲解 token/tokenizer、logits/sampler，并新增、验证极简 tokenizer/sampler 代码操练。
+- Current lesson: `learning/docs/lesson_01_scheduler.md`
+- Status: scheduler_schedule_understood
+- Last covered: 学习者已经理解 nano-vllm 的 `Scheduler.schedule()`：waiting/running 队列、prefill 优先、chunked prefill 限制、`num_tokens`/`num_scheduled_tokens`、prefix cache 命中、`Sequence.num_tokens` 与 `num_prompt_tokens` 的区别。
 
 ## Lesson Status
 
 - `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
-- `learning/docs/prereq_00_llm_inference_big_picture.md`: in_progress
+- `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
 - `learning/docs/lesson_00_project_map.md`: pending_restart
-- `learning/docs/lesson_01_scheduler.md`: created_for_later
+- `learning/docs/lesson_01_scheduler.md`: schedule_function_understood
 
 说明：学习者要求“从最开始，重新学习”。此前内容不删除，作为历史材料和后续讲义保留；但当前学习路径从零基础入口重新开始。后续必须按“背景问题 -> 核心直觉 -> 小例子 -> 源码 -> 回扣知识”的顺序推进。
 
 ## Next Lesson
 
-继续 `learning/docs/prereq_00_llm_inference_big_picture.md`。目标是理解 token/tokenizer、prompt/completion、logits/sampler，并通过代码操练跑通文本到 token id 再到采样生成的最小链路。
+继续 `learning/docs/lesson_01_scheduler.md`。目标是从已经理解的 `schedule()` 继续进入 `postprocess()`、`BlockManager` 和 KV cache block 生命周期。
 
 ## Next Actions
 
-1. 从 `learning/docs/prereq_00_llm_inference_big_picture.md` 继续。
-2. 先回顾 token/tokenizer、logits/sampler：模型读 token id，不直接读字符串；模型输出 logits，sampler 负责选 next token。
-3. 让学习者运行并修改 `python3 learning/exercises/prereq_01_toy_tokenizer_sampler.py`，例如调整 `TOY_LOGITS` 第一步分数，观察生成结果变化。
-4. 继续讲 prompt/completion/context，然后引入 prefill/decode 的背景。
-5. 回扣到 nano-vllm：后续会在 `LLMEngine.add_request()`、`SamplingParams`、`Sampler` 中看到同样概念。
+1. 从 `learning/docs/lesson_01_scheduler.md` 继续。
+2. 先让学习者用自己的话复述：`schedule()` 如何先 prefill、再 decode，以及为什么本轮有 prefill 就直接返回。
+3. 进入 `Scheduler.postprocess()`：解释模型输出 token 后如何更新 `num_cached_tokens`、追加 token、判断 finished、释放 KV cache。
+4. 温和引入 `nanovllm/engine/block_manager.py`：只讲 block 分配、释放、prefix cache 的最小必要背景。
+5. 准备一个小练习：扩展 toy scheduler，显式打印“请求完成后释放资源”的动作，再对照真实 `block_manager.deallocate(seq)`。
 
 ## Session Log
 
@@ -132,3 +132,52 @@ Last updated: 2026-06-27
 - `nanovllm/engine/sequence.py`：请求状态、prompt token、generated token、finished。
 - `nanovllm/engine/scheduler.py`：waiting/running 队列、资源限制、调度决策。
 - `nanovllm/engine/llm_engine.py`：`step()` 如何把 scheduler 和 model runner 串起来。
+
+## Session 2026-06-28
+
+### Summary
+
+本次开始前按新约束先从 `origin/main` 快进更新代码，然后继续 `lesson_01_scheduler.md`。学习重点从 toy scheduler 过渡到 nano-vllm 的真实 `Scheduler.schedule()`，并围绕学习者的问题逐段澄清调度细节。
+
+### Concepts Covered
+
+- `schedule()` 的返回值：`list[Sequence]` 和 `is_prefill`。
+- prefill 优先：本轮只要安排到 prefill batch，就返回，不混合 decode。
+- waiting/running 状态变化：prefill 完成后从 `waiting` 移到 `running`。
+- chunked prefill 限制：允许一个 prefill batch 有多个请求，但只允许 batch 的第一条请求被切开。
+- `num_tokens`：当前 seq 在 prefill 阶段还需要模型处理的 token 数。
+- `num_scheduled_tokens`：本轮实际安排处理的 token 数。
+- prefix cache 命中：相同 prompt 前缀的完整 KV cache block 可以复用，减少需要重新 prefill 的 token。
+- `Sequence.num_tokens` 与 `num_prompt_tokens`：初始化时相同，但前者随生成增长，后者固定记录原始 prompt 长度。
+- toy scheduler 与真实源码的区别：toy 中请求完成后“不再 append 回 running”表示释放资源；真实 nano-vllm 中 `postprocess()` 会调用 `block_manager.deallocate(seq)`。
+
+### Files / Exercises Used
+
+- `learning/exercises/lesson_01_toy_scheduler.py`
+- `learning/docs/lesson_01_scheduler.md`
+- `nanovllm/engine/sequence.py`
+- `nanovllm/engine/scheduler.py`
+- `nanovllm/engine/llm_engine.py`
+- `nanovllm/engine/block_manager.py`
+
+### Learner Answers / Checks
+
+- 能解释 `waiting` 存放未完成 prefill 的请求，`running` 存放已经完成 prefill、还未 decode 结束的请求。
+- 能解释 `max_num_batched_tokens` 变小会让长 prompt 分更多轮 prefill。
+- 能指出 step 3 中 `[B, C]` 是因为 B 剩余 2 个 token、C 需要 2 个 token，都能完整放入剩余 budget。
+- 能理解 `schedule()` 的整体逻辑，并明确表示已经理解 nano-vllm 的 `schedule()` 函数。
+
+### Lesson Docs Updated
+
+- `learning/docs/lesson_01_scheduler.md`：补充 prefix cache、chunked prefill 限制、toy 释放资源与真实 `deallocate()` 的区别、`Sequence` 字段语义、`Scheduler.schedule()` 逐段解释。
+
+### Current Lesson Status
+
+- `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
+- `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
+- `learning/docs/lesson_01_scheduler.md`: schedule_function_understood
+- `learning/docs/lesson_00_project_map.md`: pending_restart
+
+### Next Action
+
+下次继续 `learning/docs/lesson_01_scheduler.md`。先快速复述 `schedule()`，然后进入 `Scheduler.postprocess()` 和 `BlockManager` 的最小必要背景：模型输出 token 后如何更新 cache 进度、追加 token、判断 finished，并释放 KV cache block。
