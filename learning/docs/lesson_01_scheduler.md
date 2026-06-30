@@ -563,3 +563,128 @@ return scheduled_seqs, False
 ```
 
 decode 至少应该安排到一条请求。安排好的请求放回 running 队列，等待模型输出后由 `postprocess()` 判断是否完成。`False` 表示本轮是 decode。
+
+### Scheduler.postprocess 逐行阅读
+
+对应文件：`nanovllm/engine/scheduler.py`
+
+`schedule()` 负责决定“这一轮谁去跑模型”。`postprocess()` 负责在模型跑完后，更新这些请求的账本：
+
+```python
+def postprocess(self, seqs: list[Sequence], token_ids: list[int], is_prefill: bool):
+    for seq, token_id in zip(seqs, token_ids):
+        self.block_manager.hash_blocks(seq)
+        seq.num_cached_tokens += seq.num_scheduled_tokens
+        seq.num_scheduled_tokens = 0
+        if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+            continue
+        seq.append_token(token_id)
+        if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            seq.status = SequenceStatus.FINISHED
+            self.block_manager.deallocate(seq)
+            self.running.remove(seq)
+```
+
+函数参数：
+
+```text
+seqs：这一轮刚刚被模型处理过的请求列表。
+token_ids：模型给每个请求预测出的下一个 token。
+is_prefill：这一轮是不是 prefill。
+```
+
+逐行理解：
+
+```python
+for seq, token_id in zip(seqs, token_ids):
+```
+
+把请求和模型输出一一配对。例如 `seqs = [A, B]`，`token_ids = [18, 42]`，表示 A 得到 token 18，B 得到 token 42。
+
+```python
+self.block_manager.hash_blocks(seq)
+```
+
+给已经写入 KV cache 的完整 block 计算 hash，并登记到 prefix cache 索引里。它不是在生成 token，而是在记录“这段 KV cache 以后可能被相同前缀复用”。
+
+```python
+seq.num_cached_tokens += seq.num_scheduled_tokens
+```
+
+模型已经处理完本轮安排的 token，所以这些 token 对应的 KV cache 已经存在。把本轮处理量计入 `num_cached_tokens`。
+
+```python
+seq.num_scheduled_tokens = 0
+```
+
+清空本轮临时调度量。下一轮 `schedule()` 会重新设置它。
+
+```python
+if is_prefill and seq.num_cached_tokens < seq.num_tokens:
+    continue
+```
+
+如果当前是 prefill，并且 prompt 还没全部进入 KV cache，就先跳过后面的 `append_token()`。这是 chunked prefill 的关键：prompt 没处理完时，还没有真正进入 completion token 生成阶段。
+
+```python
+seq.append_token(token_id)
+```
+
+把模型输出的 token 加到这条 `Sequence` 里。`Sequence.append_token()` 会做三件事：
+
+```python
+self.token_ids.append(token_id)
+self.last_token = token_id
+self.num_tokens += 1
+```
+
+所以 `num_tokens` 会随着 decode 增长，而 `num_prompt_tokens` 固定记录原始 prompt 长度。
+
+```python
+if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+```
+
+判断请求是否结束。结束条件有两个：
+
+```text
+1. 模型输出了 EOS，并且没有设置 ignore_eos。
+2. 生成 token 数量已经达到 max_tokens。
+```
+
+```python
+seq.status = SequenceStatus.FINISHED
+```
+
+把请求状态标记为完成。完成后不应该再被 scheduler 调度。
+
+```python
+self.block_manager.deallocate(seq)
+```
+
+释放这条请求占用的 KV cache block。KV cache 在 GPU 显存里，空间有限；请求结束后如果不释放，后面的请求就无法复用这些 block。
+
+```python
+self.running.remove(seq)
+```
+
+把完成的请求从 `running` 队列移除。
+
+这一段可以压缩成一条链路：
+
+```text
+模型输出 token_id
+-> 更新 KV cache 进度
+-> 如果 prefill 还没完成，continue
+-> 否则 append_token
+-> 判断 EOS 或 max_tokens
+-> FINISHED 后释放 KV cache block
+-> 从 running 移除
+```
+
+学习者已能复述的关键点：
+
+```text
+prefill 未结束时，先不走 append_token 的逻辑。
+append_token 之后，这个 Sequence 的 token 数量会 +1。
+请求结束后必须释放 KV cache。
+```

@@ -1,6 +1,6 @@
 # 学习进度
 
-Last updated: 2026-06-28
+Last updated: 2026-06-30
 
 ## Learner Profile
 
@@ -11,6 +11,7 @@ Last updated: 2026-06-28
 - 总目标：从零基础入手，通过 nano-vllm 掌握 vLLM，进而掌握大模型推理的基本技能。
 - 结束学习约定：当学习者说“不学了”“今天到这”“停止学习”等表达时，先更新本进度文件，再提交学习相关改动并推送到 `origin/main`。
 - 教学详细度要求：讲解需要更细，默认多补充背景知识、动机、定义、例子和源码锚点。
+- nano-vllm 源码讲解要求：默认尽量逐行讲解；每次先说明代码段要解决的真实问题，再小块展示源码，逐行解释变量变化和控制流，最后总结这一小段的整体作用。
 - 讲义维护要求：结合教学内容和学习者提问，随时更新 `learning/docs/` 中每一课的讲义，使其持续沉淀为个人复习材料。
 - 教学顺序要求：必须先讲背景知识和核心直觉，再引入 nano-vllm 源码，最后用源码回扣知识点；不要一上来就看源码。
 - 代码操练要求：每一课尽量安排实际代码编写练习，优先放在 `learning/exercises/`，并在讲义中记录目标、运行方式、预期观察和思考题。
@@ -19,15 +20,15 @@ Last updated: 2026-06-28
 
 - Stage: 0 - 学习档案与项目地图搭建
 - Current lesson: `learning/docs/lesson_01_scheduler.md`
-- Status: scheduler_schedule_understood
-- Last covered: 学习者已经理解 nano-vllm 的 `Scheduler.schedule()`：waiting/running 队列、prefill 优先、chunked prefill 限制、`num_tokens`/`num_scheduled_tokens`、prefix cache 命中、`Sequence.num_tokens` 与 `num_prompt_tokens` 的区别。
+- Status: scheduler_postprocess_understood_blockmanager_next
+- Last covered: 学习者已经理解 nano-vllm 的 `Scheduler.schedule()` 和 `Scheduler.postprocess()`：waiting/running 队列、prefill 优先、chunked prefill 限制、`num_tokens`/`num_scheduled_tokens`、prefix cache 命中、`Sequence.num_tokens` 与 `num_prompt_tokens` 的区别、模型输出 token 后如何更新 cache 进度、何时 `append_token()`、何时标记 `FINISHED` 并释放 KV cache block。
 
 ## Lesson Status
 
 - `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
 - `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
 - `learning/docs/lesson_00_project_map.md`: pending_restart
-- `learning/docs/lesson_01_scheduler.md`: schedule_function_understood
+- `learning/docs/lesson_01_scheduler.md`: postprocess_understood_blockmanager_next
 
 说明：学习者要求“从最开始，重新学习”。此前内容不删除，作为历史材料和后续讲义保留；但当前学习路径从零基础入口重新开始。后续必须按“背景问题 -> 核心直觉 -> 小例子 -> 源码 -> 回扣知识”的顺序推进。
 
@@ -181,3 +182,51 @@ Last updated: 2026-06-28
 ### Next Action
 
 下次继续 `learning/docs/lesson_01_scheduler.md`。先快速复述 `schedule()`，然后进入 `Scheduler.postprocess()` 和 `BlockManager` 的最小必要背景：模型输出 token 后如何更新 cache 进度、追加 token、判断 finished，并释放 KV cache block。
+
+## 2026-06-30 Session Summary
+
+今天继续 Lesson 01 scheduler 主线，从 `Scheduler.schedule()` 过渡到 `Scheduler.postprocess()`。
+
+### Concepts Covered
+
+- 复述 `postprocess()` 的职责：模型运行结束后，scheduler 根据模型输出更新每条 `Sequence` 的状态。
+- 逐行解释 `Scheduler.postprocess()`：
+  - `zip(seqs, token_ids)`：把本轮运行的请求和模型输出 token 一一配对。
+  - `hash_blocks(seq)`：给已经写入 KV cache 的完整 block 建 hash 索引，服务 prefix cache 复用。
+  - `num_cached_tokens += num_scheduled_tokens`：把本轮已经处理的 token 计入 KV cache 进度。
+  - `num_scheduled_tokens = 0`：清空本轮临时调度量。
+  - `if is_prefill and seq.num_cached_tokens < seq.num_tokens: continue`：chunked prefill 还没处理完整 prompt 时，不进入 `append_token()`。
+  - `append_token(token_id)`：将模型输出 token 追加到 `Sequence.token_ids`，并使 `num_tokens += 1`。
+  - EOS 或 `max_tokens` 判断：决定请求是否完成。
+  - 完成后设置 `FINISHED`，调用 `block_manager.deallocate(seq)` 释放 KV cache block，并从 `running` 队列移除。
+- 学习者能准确复述：
+  - prefill 未结束时先不走 `append_token()`。
+  - `append_token()` 后该 `Sequence` 的 token 数量会增加。
+  - 请求结束后必须释放 KV cache。
+- 讨论后续学习顺序：`BlockManager` 会接着讲；`model_runner.run` 也会讲，但建议在 `Scheduler + BlockManager` 稳定后再进入。
+- 记录新的教学偏好：nano-vLLM 源码讲解默认尽量逐行讲解，不只讲整体大意。
+
+### Files / Exercises Used
+
+- `nanovllm/engine/scheduler.py`
+- `nanovllm/engine/sequence.py`
+- `nanovllm/engine/block_manager.py`
+- `learning/docs/lesson_01_scheduler.md`
+- `learning/progress.md`
+
+### Current Lesson Status
+
+- `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
+- `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
+- `learning/docs/lesson_01_scheduler.md`: postprocess_understood_blockmanager_next
+- `learning/docs/lesson_00_project_map.md`: pending_restart
+
+### Next Action
+
+下次继续 `learning/docs/lesson_01_scheduler.md`。先用 3-5 分钟复述 `Scheduler.postprocess()`：
+
+```text
+模型输出 token_id -> 更新 KV cache 进度 -> prefill 未完成则 continue -> append_token -> 判断 FINISHED -> deallocate -> 从 running 移除
+```
+
+然后进入 `BlockManager` 的背景和源码逐行讲解：为什么 KV cache 要按 block 管理，`block_table` 是什么，`free_block_ids` / `used_block_ids` 是什么，以及 `allocate()`、`can_append()`、`may_append()`、`deallocate()`、`hash_blocks()` 各自解决什么问题。
