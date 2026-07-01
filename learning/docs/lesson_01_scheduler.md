@@ -688,3 +688,185 @@ prefill 未结束时，先不走 append_token 的逻辑。
 append_token 之后，这个 Sequence 的 token 数量会 +1。
 请求结束后必须释放 KV cache。
 ```
+
+## 2026-07-01 BlockManager：KV cache block、prefix cache 和抢占
+
+今天从 `Scheduler.postprocess()` 里的 `block_manager.deallocate(seq)` 接到 `BlockManager`。
+
+核心背景：
+
+```text
+token_ids 是 CPU 侧的 token 账本。
+KV cache 是模型跑完后写在 GPU 显存里的 K/V 张量。
+block_table 是这条 Sequence 的逻辑 block 到物理 KV cache block 的映射。
+```
+
+例如 `block_size = 4`，prompt 有 6 个 token：
+
+```text
+tokens:      [10, 11, 12, 13, 14, 15]
+logical:     block 0          block 1
+block_table: [3,               8]
+```
+
+读法：
+
+```text
+逻辑 block 0 的 KV cache 写到物理 block 3。
+逻辑 block 1 的 KV cache 写到物理 block 8。
+```
+
+### allocate 与 may_append
+
+`allocate(seq, num_cached_blocks)` 用在 prefill 前。它为当前已有的一整段 prompt 或上下文准备 KV cache block。
+
+```text
+allocate = 先给这段上下文占好 KV cache 写入位置。
+```
+
+如果 prompt 长度为 6，`block_size = 4`，通常需要 2 个 block。`allocate()` 会把物理 block id 填进 `seq.block_table`。
+
+`may_append(seq)` 用在 decode 前。decode 每轮通常只处理 1 个 token，所以它只关心“这轮要处理的最后一个 token 的 KV cache 是否需要新 block”。
+
+关键条件：
+
+```python
+len(seq) % self.block_size == 1
+```
+
+读法：
+
+```text
+当前最后一个 token 是某个 block 的第一个 token。
+如果是，就需要先追加一个新物理 block。
+```
+
+例子：`block_size = 4`，prompt 长度是 4。prefill 后模型生成第一个 completion token：
+
+```text
+token_ids = [10, 11, 12, 13, 14]
+len(seq) = 5
+5 % 4 == 1
+```
+
+token `14` 是新 block 的第一个 token。下一轮 decode 要处理 `14`，所以必须先给它准备新的 KV cache block。
+
+### prefix cache
+
+`prefix cache` 是复用相同 prompt 前缀的已计算 KV cache。
+
+```text
+请求 A: [10, 11, 12, 13, 99]
+请求 B: [10, 11, 12, 13, 88]
+```
+
+如果 `block_size = 4`，两条请求的第一个完整 block 一样：
+
+```text
+[10, 11, 12, 13]
+```
+
+请求 B 可以复用请求 A 已经算好的这个 block 的 KV cache。这样 B 不必重新 prefill 这 4 个 token。
+
+源码里的配合：
+
+```text
+hash_blocks(seq): 把已经计算过的完整 prefix block 登记到 hash_to_block_id。
+can_allocate(seq): 新请求进来时从前往后检查完整 block 是否命中 prefix cache。
+allocate(seq, num_cached_blocks): 对命中的 block 增加 ref_count，对未命中的部分新分配 block。
+```
+
+链式 hash 的意义：
+
+```text
+block1 的 hash 不只包含 block1 自己，还包含前一个 block 的 hash。
+这样可以保证命中的是“从开头到这里都一样”的前缀，而不是某个局部 block 偶然一样。
+```
+
+### ref_count 与 deallocate
+
+有了 prefix cache，一个物理 block 可能被多条 Sequence 同时引用：
+
+```text
+A.block_table = [3, 7]
+B.block_table = [3, 8]
+```
+
+其中 block 3 是共享前缀。它的 `ref_count = 2`。
+
+当 A 结束时：
+
+```text
+block 3.ref_count: 2 -> 1
+block 7.ref_count: 1 -> 0
+```
+
+block 3 不能释放，因为 B 还在用。只有 `ref_count == 0` 的 block 才能回到 `free_block_ids`。
+
+一句话：
+
+```text
+ref_count 是为了安全复用 prefix cache block；deallocate 只释放没人再引用的 block。
+```
+
+### can_append、may_append 与 preempt
+
+decode 前，scheduler 会先问：
+
+```python
+self.block_manager.can_append(seq)
+```
+
+如果这轮 decode 不需要新 block，永远可以 append。如果需要新 block，就必须确认 `free_block_ids` 至少还有 1 个。
+
+如果 block 不够，scheduler 会抢占某些 running 请求：
+
+```python
+def preempt(self, seq: Sequence):
+    seq.status = SequenceStatus.WAITING
+    seq.is_prefill = True
+    self.block_manager.deallocate(seq)
+    self.waiting.appendleft(seq)
+```
+
+抢占不是丢弃请求，而是释放它的 KV cache，把它退回 waiting。因为 KV cache 已经被释放，它之后不能直接 decode，必须重新 prefill 来重建上下文 KV cache。
+
+这里的 `seq.is_prefill = True` 表示：
+
+```text
+这条 Sequence 下一次被模型处理时，要按 prefill 模式处理。
+```
+
+它不是说这条请求从未生成过 token，而是说它的 GPU KV cache 需要重新建立。
+
+### block_table 进入模型执行
+
+`block_table` 不只是 Python 侧资源管理用的。`ModelRunner` 会把多条请求的 `block_table` 组织成 `block_tables`，并生成 `slot_mapping`。
+
+```text
+block_tables:
+给 attention 查历史 KV cache 用，说明每条 sequence 的逻辑 block 在哪些物理 block。
+
+slot_mapping:
+给 store_kvcache 写当前 token 的 K/V 用，说明本轮每个 token 的 KV cache 写到哪个具体槽位。
+```
+
+所以完整链路是：
+
+```text
+Scheduler 选择哪些 seq 跑
+BlockManager 确保 KV cache block 足够
+ModelRunner 根据 block_table 准备 block_tables 和 slot_mapping
+Attention 读写 KV cache
+Sampler 采样下一个 token
+Scheduler.postprocess 更新 Sequence 并在结束时释放 block
+```
+
+### 本节压缩总结
+
+```text
+BlockManager 负责把 Sequence 的 token 序列映射到 GPU KV cache block；
+它能为 prefill 一次分配多个 block，为 decode 按需追加 block；
+还能把已计算的完整前缀 block 做 hash 登记，让后来的相同前缀请求复用；
+最后通过 ref_count 保证共享 block 不会被提前释放。
+```

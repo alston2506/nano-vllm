@@ -1,6 +1,56 @@
 # 学习进度
 
-Last updated: 2026-06-30
+Last updated: 2026-07-01
+
+## 2026-07-01
+
+### Summary
+
+继续 `learning/docs/lesson_01_scheduler.md`，完成 `BlockManager` 背景和主要方法讲解。学习重点从 `Scheduler.postprocess()` 中的 `deallocate()` 扩展到 KV cache block 管理、prefix cache、引用计数、抢占，以及 `block_table` 如何进入 `ModelRunner` / attention 执行。
+
+### Concepts Covered
+
+- KV cache block 的动机：GPU 显存有限，不能把每条请求当作连续无限大缓存。
+- `seq.block_table`：Sequence 的逻辑 block 到物理 KV cache block 的映射。
+- `allocate(seq, num_cached_blocks)`：prefill 前为整段 prompt / 上下文准备 KV cache 写入位置。
+- `may_append(seq)`：decode 前按需追加新 block；重点理解 `len(seq) % block_size == 1`。
+- `prefix cache`：复用相同 prompt 前缀已经算好的完整 block KV cache。
+- `hash_blocks()` 和链式 hash：保证命中的是从开头开始一致的 prefix，而不是局部 block 偶然一样。
+- `ref_count`：共享 prefix block 被多条 Sequence 引用时，避免提前释放。
+- `deallocate(seq)`：请求结束或被抢占时释放 block；只有 `ref_count == 0` 的 block 真正回到空闲池。
+- `preempt(seq)`：KV cache block 不够时，把 running 请求退回 waiting，并设置 `seq.is_prefill = True` 以便后续重建 KV cache。
+- `block_tables` 与 `slot_mapping`：`block_table` 最终会进入模型执行，指导 attention 读写 KV cache。
+
+### Questions / Confusions Resolved
+
+- 区分 `allocate()` 与 `may_append()`：前者服务 prefill 的一段上下文，后者服务 decode 的单 token 增长。
+- 解释 `prefix cache` 是什么，以及为什么只复用完整前缀 block。
+- 解释抢占后为什么要设置 `seq.is_prefill = True`：不是表示请求从未生成过 token，而是表示下一次运行要用 prefill 模式重建上下文 KV cache。
+
+### Files / Code Exercised
+
+- `nanovllm/engine/block_manager.py`
+- `nanovllm/engine/scheduler.py`
+- `nanovllm/engine/sequence.py`
+- `nanovllm/engine/llm_engine.py`
+- `nanovllm/engine/model_runner.py`
+- `nanovllm/layers/attention.py`
+- `learning/exercises/lesson_00_sequence_blocks.py`
+
+### Lesson Docs Updated
+
+- `learning/docs/lesson_01_scheduler.md`：新增 2026-07-01 BlockManager 课堂记录，覆盖 KV cache block、prefix cache、ref_count、preempt、`block_tables` / `slot_mapping`。
+
+### Current Lesson Status
+
+- `learning/docs/prereq_minus1_from_zero_to_inference.md`: recap_passed
+- `learning/docs/prereq_00_llm_inference_big_picture.md`: mostly_passed_needs_short_review
+- `learning/docs/lesson_01_scheduler.md`: blockmanager_main_ideas_understood_needs_hand_exercise
+- `learning/docs/lesson_00_project_map.md`: pending_restart
+
+### Next Action
+
+下次继续 `learning/docs/lesson_01_scheduler.md`，先做一个手算练习：给定 `block_size`、`free_block_ids`、两三个请求的 prompt 长度和 `max_num_batched_tokens`，逐轮写出 `waiting` / `running` / `block_table` / `num_cached_tokens` 的变化。练习后再回到源码，把 `Scheduler.schedule()` 的 prefill 分支和 decode 分支从头到尾复述一遍。
 
 ## Learner Profile
 
